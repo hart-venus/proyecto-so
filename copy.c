@@ -61,6 +61,8 @@ void copy_file(const char *src, const char *dst) {
     }
 }
 
+
+
 void process_dir(const char *src_dir, const char *dst_dir, int msg_id) {
     DIR *dir;
     struct dirent *entry;
@@ -109,6 +111,7 @@ void process_dir(const char *src_dir, const char *dst_dir, int msg_id) {
 
     closedir(dir);
 }
+
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
@@ -175,3 +178,4 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+
