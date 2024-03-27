@@ -21,6 +21,12 @@ int main(int argc, char *argv[]) {
     char *srcDir = argv[1];
     char *destDir = argv[2];
 
+    // manejar caso en el que ocupamos crear el directorio destino
+    struct stat st = {0};
+    if (stat(destDir, &st) == -1) {
+        mkdir(destDir, 0700);
+    }
+
     traverseDirectory(srcDir, destDir);
 
     return 0;
