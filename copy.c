@@ -6,11 +6,20 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/msg.h>
 
 #define MAX_PROCESSES 4
+#define MAX_PATH_LEN 512
+
+struct message {
+    long mtype;
+    char srcPath[MAX_PATH_LEN];
+    char destPath[MAX_PATH_LEN];
+};
 
 void copyFile(char *srcPath, char *destPath);
-void traverseDirectory(char *srcDir, char *destDir);
+void traverseDirectory(char *srcDir, char *destDir, int qid);
+void childProcess(int qid);
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
@@ -26,19 +35,53 @@ int main(int argc, char *argv[]) {
         mkdir(destDir, 0700);
     }
 
-    traverseDirectory(srcDir, destDir);
+    // Create the message queue
+    key_t key = ftok(".", 'q');
+    int qid = msgget(key, IPC_CREAT | 0666);
+
+    // Fork child processes and place them in a pool
+    pid_t childPids[MAX_PROCESSES];
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            childProcess(qid);
+            exit(0);
+        } else if (pid < 0) {
+            printf("Failed to fork child process\n");
+            return 1;
+        } else {
+            childPids[i] = pid;
+        }
+    }
+
+    traverseDirectory(srcDir, destDir, qid);
+
+    // Send termination messages to child processes
+    struct message msg;
+    msg.mtype = 1;
+    strcpy(msg.srcPath, "");
+    strcpy(msg.destPath, "");
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        msgsnd(qid, &msg, sizeof(struct message) - sizeof(long), 0);
+    }
+
+    // Wait for child processes to exit
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        waitpid(childPids[i], NULL, 0);
+    }
+
+    // Remove the message queue
+    msgctl(qid, IPC_RMID, NULL);
 
     return 0;
 }
 
-void traverseDirectory(char *srcDir, char *destDir) {
+void traverseDirectory(char *srcDir, char *destDir, int qid) {
     DIR *dir;
     struct dirent *entry;
     struct stat fileStat;
-    char srcPath[512];
-    char destPath[512];
-    pid_t childPids[MAX_PROCESSES];
-    int numChildren = 0;
+    char srcPath[MAX_PATH_LEN];
+    char destPath[MAX_PATH_LEN];
 
     dir = opendir(srcDir);
     if (dir == NULL) {
@@ -55,31 +98,32 @@ void traverseDirectory(char *srcDir, char *destDir) {
 
         if (stat(srcPath, &fileStat) == 0 && S_ISDIR(fileStat.st_mode)) {
             mkdir(destPath, fileStat.st_mode & 0777);
-            traverseDirectory(srcPath, destPath);
+            traverseDirectory(srcPath, destPath, qid);
         } else {
-            // Wait for a child process to finish if the limit is reached
-            while (numChildren >= MAX_PROCESSES) {
-                wait(NULL);
-                numChildren--;
-            }
-
-            pid_t pid = fork();
-            if (pid == 0) {
-                copyFile(srcPath, destPath);
-                exit(0);
-            } else if (pid > 0) {
-                childPids[numChildren++] = pid;
-            } else {
-                printf("Failed to fork for file %s\n", srcPath);
-            }
+            struct message msg;
+            msg.mtype = 1;
+            strcpy(msg.srcPath, srcPath);
+            strcpy(msg.destPath, destPath);
+            msgsnd(qid, &msg, sizeof(struct message) - sizeof(long), 0);
         }
     }
 
     closedir(dir);
+}
 
-    // Wait for all child processes to finish
-    while (numChildren > 0) {
-        waitpid(childPids[--numChildren], NULL, 0);
+void childProcess(int qid) {
+    struct message msg;
+    while (1) {
+        if (msgrcv(qid, &msg, sizeof(struct message) - sizeof(long), 1, 0) == -1) {
+            perror("msgrcv");
+            exit(1);
+        }
+
+        if (strlen(msg.srcPath) == 0 && strlen(msg.destPath) == 0) {
+            break; // Termination message received
+        }
+
+        copyFile(msg.srcPath, msg.destPath);
     }
 }
 
@@ -103,7 +147,7 @@ void copyFile(char *srcPath, char *destPath) {
     }
 
     stat(srcPath, &fileStat);
-    printf("Copying %s (%ld bytes)\n", srcPath, fileStat.st_size);
+    printf("copiando %s (%ld bytes)\n", srcPath, fileStat.st_size);
 
     while ((bytesRead = fread(buffer, 1, sizeof(buffer), src)) > 0)
         fwrite(buffer, 1, bytesRead, dest);
