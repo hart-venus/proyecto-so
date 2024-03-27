@@ -21,7 +21,6 @@ int main(int argc, char *argv[]) {
     char *srcDir = argv[1];
     char *destDir = argv[2];
 
-    // manejar caso en el que ocupamos crear el directorio destino
     struct stat st = {0};
     if (stat(destDir, &st) == -1) {
         mkdir(destDir, 0700);
@@ -58,23 +57,30 @@ void traverseDirectory(char *srcDir, char *destDir) {
             mkdir(destPath, fileStat.st_mode & 0777);
             traverseDirectory(srcPath, destPath);
         } else {
-            while (numChildren == MAX_PROCESSES)
+            // Wait for a child process to finish if the limit is reached
+            while (numChildren >= MAX_PROCESSES) {
                 wait(NULL);
+                numChildren--;
+            }
 
             pid_t pid = fork();
             if (pid == 0) {
                 copyFile(srcPath, destPath);
                 exit(0);
-            } else {
+            } else if (pid > 0) {
                 childPids[numChildren++] = pid;
+            } else {
+                printf("Failed to fork for file %s\n", srcPath);
             }
         }
     }
 
     closedir(dir);
 
-    while (numChildren > 0)
-        wait(NULL);
+    // Wait for all child processes to finish
+    while (numChildren > 0) {
+        waitpid(childPids[--numChildren], NULL, 0);
+    }
 }
 
 void copyFile(char *srcPath, char *destPath) {
