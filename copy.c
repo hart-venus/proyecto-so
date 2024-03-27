@@ -2,180 +2,100 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/msg.h>
-#include <errno.h>
-#include <fcntl.h>
 
-#define MAX_PROCESSES 10
-#define MSG_KEY 1234
-#define FILE_MSG_TYPE 1
-#define TERMINATE_MSG_TYPE 2
+#define MAX_PROCESSES 4
 
-struct msg_buf {
-    long mtype;
-    char filename[256];
-};
+void copyFile(char *srcPath, char *destPath);
+void traverseDirectory(char *srcDir, char *destDir);
 
-void copy_file(const char *src, const char *dst) {
-    int in_fd, out_fd, n_chars;
-    char buf[1024];
-
-    // Open the source file
-    in_fd = open(src, O_RDONLY);
-    if (in_fd == -1) {
-        perror("Opening source file");
-        return;
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        printf("Usage: %s <source_directory> <destination_directory>\n", argv[0]);
+        return 1;
     }
 
-    // Open/create the destination file
-    out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (out_fd == -1) {
-        perror("Opening destination file");
-        close(in_fd);
-        return;
-    }
+    char *srcDir = argv[1];
+    char *destDir = argv[2];
 
-    // Copy the file
-    while ((n_chars = read(in_fd, buf, sizeof(buf))) > 0) {
-        if (write(out_fd, buf, n_chars) != n_chars) {
-            perror("Writing to destination file");
-            break;
-        }
-    }
+    traverseDirectory(srcDir, destDir);
 
-    if (n_chars == -1) {
-        perror("Reading from source file");
-    }
-
-    // Close the files
-    if (close(in_fd) == -1) {
-        perror("Closing source file");
-    }
-
-    if (close(out_fd) == -1) {
-        perror("Closing destination file");
-    }
+    return 0;
 }
 
-
-
-void process_dir(const char *src_dir, const char *dst_dir, int msg_id) {
+void traverseDirectory(char *srcDir, char *destDir) {
     DIR *dir;
     struct dirent *entry;
-    char src_path[512], dst_path[512];
-    struct stat st;
+    struct stat fileStat;
+    char srcPath[512];
+    char destPath[512];
+    pid_t childPids[MAX_PROCESSES];
+    int numChildren = 0;
 
-    dir = opendir(src_dir);
+    dir = opendir(srcDir);
     if (dir == NULL) {
-        perror("Failed to open directory");
+        printf("Error opening directory %s\n", srcDir);
         return;
     }
 
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue; // Skip current and parent directories
-        }
-
-        snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, entry->d_name);
-        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, entry->d_name);
-
-        if (lstat(src_path, &st) == -1) {
-            perror("Failed to get file status");
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
-        }
 
-        if (S_ISDIR(st.st_mode)) {
-            // It's a directory: create it in the destination and process it
-            if (mkdir(dst_path, st.st_mode) == -1 && errno != EEXIST) {
-                perror("Failed to create directory");
-                continue;
-            }
-            process_dir(src_path, dst_path, msg_id);
+        snprintf(srcPath, sizeof(srcPath), "%s/%s", srcDir, entry->d_name);
+        snprintf(destPath, sizeof(destPath), "%s/%s", destDir, entry->d_name);
+
+        if (stat(srcPath, &fileStat) == 0 && S_ISDIR(fileStat.st_mode)) {
+            mkdir(destPath, fileStat.st_mode & 0777);
+            traverseDirectory(srcPath, destPath);
         } else {
-            // It's a file: send message to message queue
-            struct msg_buf msg;
-            msg.mtype = FILE_MSG_TYPE; // File message type
-            strncpy(msg.filename, src_path, sizeof(msg.filename) - 1);
-            msg.filename[sizeof(msg.filename) - 1] = '\0';
+            while (numChildren == MAX_PROCESSES)
+                wait(NULL);
 
-            if (msgsnd(msg_id, &msg, sizeof(msg.filename), 0) == -1) {
-                perror("Failed to send message");
-                exit(EXIT_FAILURE);
+            pid_t pid = fork();
+            if (pid == 0) {
+                copyFile(srcPath, destPath);
+                exit(0);
+            } else {
+                childPids[numChildren++] = pid;
             }
         }
     }
 
     closedir(dir);
+
+    while (numChildren > 0)
+        wait(NULL);
 }
 
+void copyFile(char *srcPath, char *destPath) {
+    FILE *src, *dest;
+    char buffer[4096];
+    size_t bytesRead;
+    struct stat fileStat;
 
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s source_dir dest_dir\n", argv[0]);
-        return 1;
+    src = fopen(srcPath, "rb");
+    if (src == NULL) {
+        printf("Error opening file %s\n", srcPath);
+        return;
     }
 
-    char *src_dir = argv[1];
-    char *dst_dir = argv[2];
-
-    // Create the message queue
-    int msg_id = msgget(MSG_KEY, IPC_CREAT | 0666);
-    if (msg_id == -1) {
-        perror("Failed to create message queue");
-        exit(EXIT_FAILURE);
+    dest = fopen(destPath, "wb");
+    if (dest == NULL) {
+        printf("Error creating file %s\n", destPath);
+        fclose(src);
+        return;
     }
 
-    // Fork child processes
-    pid_t pids[MAX_PROCESSES];
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        pids[i] = fork();
-        if (pids[i] == -1) {
-            perror("Fork failed");
-            exit(EXIT_FAILURE);
-        }
+    stat(srcPath, &fileStat);
+    printf("Copying %s (%ld bytes)\n", srcPath, fileStat.st_size);
 
-        if (pids[i] == 0) { // Child process
-            struct msg_buf msg;
-            while (1) {
-                if (msgrcv(msg_id, &msg, sizeof(msg.filename), FILE_MSG_TYPE, 0) == -1) {
-                    perror("Failed to receive message");
-                    exit(EXIT_FAILURE);
-                }
+    while ((bytesRead = fread(buffer, 1, sizeof(buffer), src)) > 0)
+        fwrite(buffer, 1, bytesRead, dest);
 
-                if (msg.mtype == TERMINATE_MSG_TYPE) {
-                    break; // Termination signal received
-                }
-
-                char dst_path[512];
-                snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, strrchr(msg.filename, '/') + 1);
-                copy_file(msg.filename, dst_path);
-            }
-            exit(EXIT_SUCCESS);
-        }
-    }
-
-    // Process the directories
-    process_dir(src_dir, dst_dir, msg_id);
-
-    // Send termination messages
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        struct msg_buf msg;
-        msg.mtype = TERMINATE_MSG_TYPE;
-        msgsnd(msg_id, &msg, sizeof(msg.filename), 0); // No need to check for error here
-    }
-
-    // Wait for child processes to finish
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        waitpid(pids[i], NULL, 0);
-    }
-
-    // Clean up message queue
-    msgctl(msg_id, IPC_RMID, NULL);
-
-    return 0;
+    fclose(src);
+    fclose(dest);
 }
-
